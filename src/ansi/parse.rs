@@ -1,9 +1,80 @@
+use core::str::Bytes;
+
 use ansi_term;
 use vte;
 
+#[derive(Debug, PartialEq)]
+pub enum Element {
+    Text(String),
+    Style(ansi_term::Style),
+}
+
+pub struct AnsiCodeIterator<'a> {
+    bytes: Bytes<'a>,
+    performer: Performer,
+}
+
+struct Performer {
+    style: Option<ansi_term::Style>,
+    text: String,
+}
+
+impl<'a> AnsiCodeIterator<'a> {
+    pub fn new(s: &'a str) -> Self {
+        Self {
+            bytes: s.bytes(),
+            performer: Performer {
+                style: None,
+                text: String::new(),
+            },
+        }
+    }
+
+    fn emit_text(&mut self) -> Option<String> {
+        if !self.performer.text.is_empty() {
+            let text = self.performer.text.clone();
+            self.performer.text = String::new();
+            Some(text)
+        } else {
+            None
+        }
+    }
+}
+
+impl<'a> Iterator for AnsiCodeIterator<'a> {
+    type Item = (Element, bool);
+
+    fn next(&mut self) -> Option<(Element, bool)> {
+        if let Some(style) = self.performer.style {
+            self.performer.style = None;
+            return Some((Element::Style(style), true));
+        }
+        let mut machine = vte::Parser::new();
+        loop {
+            if let Some(byte) = self.bytes.next() {
+                machine.advance(&mut self.performer, byte);
+                if let Some(style) = self.performer.style {
+                    if let Some(text) = self.emit_text() {
+                        return Some((Element::Text(text), false));
+                    }
+                    self.performer.style = None;
+                    return Some((Element::Style(style), true));
+                }
+            } else if let Some(text) = self.emit_text() {
+                return Some((Element::Text(text), false));
+            } else {
+                return None;
+            }
+        }
+    }
+}
+
 pub fn parse_first_style(s: &str) -> Option<ansi_term::Style> {
     let mut machine = vte::Parser::new();
-    let mut performer = Performer { style: None };
+    let mut performer = Performer {
+        style: None,
+        text: String::new(),
+    };
     for b in s.bytes() {
         if performer.style.is_some() {
             return performer.style;
@@ -11,10 +82,6 @@ pub fn parse_first_style(s: &str) -> Option<ansi_term::Style> {
         machine.advance(&mut performer, b)
     }
     None
-}
-
-struct Performer {
-    style: Option<ansi_term::Style>,
 }
 
 // Based on https://github.com/alacritty/vte/blob/0310be12d3007e32be614c5df94653d29fcc1a8b/examples/parselog.rs
@@ -36,7 +103,9 @@ impl vte::Perform for Performer {
         }
     }
 
-    fn print(&mut self, _c: char) {}
+    fn print(&mut self, c: char) {
+        self.text.push(c);
+    }
 
     fn execute(&mut self, _byte: u8) {}
 
@@ -191,6 +260,45 @@ fn parse_sgr_color(attrs: &[i64], i: &mut usize) -> Option<ansi_term::Color> {
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn test_iterator_1() {
+        let minus_line = "\x1b[31m0123\x1b[m\n";
+        assert_eq!(
+            AnsiCodeIterator::new(minus_line).collect::<Vec<(Element, bool)>>(),
+            vec![
+                (
+                    Element::Style(ansi_term::Style {
+                        foreground: Some(ansi_term::Color::Red),
+                        ..ansi_term::Style::default()
+                    }),
+                    true
+                ),
+                (Element::Text("0123".to_string()), false),
+                (Element::Style(ansi_term::Style::default()), true),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_iterator_2() {
+        let minus_line = "\x1b[31m0123\x1b[m456\n";
+        assert_eq!(
+            AnsiCodeIterator::new(minus_line).collect::<Vec<(Element, bool)>>(),
+            vec![
+                (
+                    Element::Style(ansi_term::Style {
+                        foreground: Some(ansi_term::Color::Red),
+                        ..ansi_term::Style::default()
+                    }),
+                    true
+                ),
+                (Element::Text("0123".to_string()), false),
+                (Element::Style(ansi_term::Style::default()), true),
+                (Element::Text("456".to_string()), false),
+            ]
+        );
+    }
 
     #[test]
     fn test_parse_first_style() {

@@ -218,13 +218,14 @@ pub fn line_has_style_other_than<'a>(line: &str, styles: impl Iterator<Item = &'
 mod tests {
 
     use super::*;
+    use crate::ansi::parse::{AnsiCodeIterator, Element};
 
     // To add to these tests:
     // 1. Stage a file with a single line containing the string "text"
     // 2. git -c 'color.diff.new = $STYLE_STRING' diff --cached  --color=always  | cat -A
 
     #[test]
-    fn test_parsed_git_style_string_is_applied_to_git_output() {
+    fn test_parse_git_style_string_and_ansi_code_iterator() {
         for (git_style_string, git_output) in &[
             // <git-default>                    "\x1b[32m+\x1b[m\x1b[32mtext\x1b[m\n"
             ("0",                               "\x1b[30m+\x1b[m\x1b[30mtext\x1b[m\n"),
@@ -253,12 +254,77 @@ mod tests {
             ("bold #aabbcc ul 19 strike" ,      "\x1b[1;4;9;38;2;170;187;204;48;5;19m+\x1b[m\x1b[1;4;9;38;2;170;187;204;48;5;19mtext\x1b[m\n"),
             ("bold 19 ul #aabbcc strike" ,      "\x1b[1;4;9;38;5;19;48;2;170;187;204m+\x1b[m\x1b[1;4;9;38;5;19;48;2;170;187;204mtext\x1b[m\n"),
             ("bold 0 ul #aabbcc strike",        "\x1b[1;4;9;30;48;2;170;187;204m+\x1b[m\x1b[1;4;9;30;48;2;170;187;204mtext\x1b[m\n"),
-            (r##"black "#ddeeff""##,            "\x1b[30;48;2;221;238;255m+\x1b[m\x1b[30;48;2;221;238;255m        .map(|(_, is_ansi)| is_ansi)\x1b[m\n"),
+            (r##"black "#ddeeff""##,            "\x1b[30;48;2;221;238;255m+\x1b[m\x1b[30;48;2;221;238;255mtext\x1b[m\n"),
             ("brightred",                       "\x1b[91m+\x1b[m\x1b[91mtext\x1b[m\n"),
-            ("normal",                          "+\x1b[mtext\x1b[m\n"),
+            ("normal",                          "\x1b[mtext\x1b[m\n"),
             ("blink",                           "\x1b[5m+\x1b[m\x1b[5mtext\x1b[m\n"),
         ] {
+
             assert!(Style::from_git_str(git_style_string).is_applied_to(git_output));
+
+            let mut it = AnsiCodeIterator::new(git_output);
+
+            if *git_style_string == "normal" {
+                // This one has a different pattern
+                assert_eq!(
+                    vec![
+                        (Element::Style(ansi_term::Style::default()), true),
+                        (Element::Text("text".to_string()), false),
+                        (Element::Style(ansi_term::Style::default()), true),
+                    ],
+                    it.collect::<Vec<(Element, bool)>>());
+                return;
+            }
+
+            // First element should be a style
+            let (element, is_ansi) = it.next().unwrap();
+            assert!(is_ansi);
+            match element {
+                Element::Style(style) => assert!(
+                    ansi_term_style_equality(
+                        style,
+                        Style::from_git_str(git_style_string).ansi_term_style)
+                ),
+                _ => assert!(false),
+            }
+
+            // Second element should be text: "+"
+            assert_eq!(
+                (Element::Text("+".to_string()), false),
+                it.next().unwrap()
+            );
+
+            // Third element is the reset style
+            assert_eq!(
+                (Element::Style(ansi_term::Style::default()), true),
+                it.next().unwrap()
+            );
+
+            // Fourth element should be a style
+            let (element, is_ansi) = it.next().unwrap();
+            assert!(is_ansi);
+            match element {
+                Element::Style(style) => assert!(
+                    ansi_term_style_equality(
+                        style,
+                        Style::from_git_str(git_style_string).ansi_term_style)
+                ),
+                _ => assert!(false),
+            }
+
+            // Fifth element should be text: "text"
+            assert_eq!(
+                (Element::Text("text".to_string()), false),
+                it.next().unwrap()
+            );
+
+            // Sixth element is the reset style
+            assert_eq!(
+                (Element::Style(ansi_term::Style::default()), true),
+                it.next().unwrap()
+            );
+
+            assert!(it.next().is_none());
         }
     }
 
